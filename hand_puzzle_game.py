@@ -193,6 +193,7 @@ class PuzzlePiece:
     current_pos: tuple
     size:        int
     dragging:    bool = False
+    snapped:     bool = False   # 정답 자리에 고정됐는지
     offset_x:    int  = 0
     offset_y:    int  = 0
 
@@ -203,6 +204,9 @@ class PuzzlePiece:
     def is_inside(self, px, py):
         x, y = self.current_pos
         return x <= px <= x+self.size and y <= py <= y+self.size
+
+    def is_correct(self):
+        return self.current_pos == self.correct_pos
 
     def draw(self, frame, fw, fh):
         x, y = self.current_pos
@@ -222,9 +226,24 @@ class PuzzlePiece:
         else:
             frame[y1:y2, x1:x2] = tile
 
-        color = (0,255,80) if self.dragging else (200,200,200)
-        thick = 3         if self.dragging else 1
+        # 테두리 색상
+        if self.snapped:
+            color, thick = (255, 150, 0), 3   # 파란색: 정답 고정
+        elif self.dragging:
+            color, thick = (0, 255, 80), 3    # 초록: 드래그 중
+        else:
+            color, thick = (200, 200, 200), 1 # 회색: 일반
+
         cv2.rectangle(frame, (x1,y1), (x2-1,y2-1), color, thick)
+
+        # 정답 고정 조각: 네 모서리에 잠금 표시
+        if self.snapped:
+            lock_size = 8
+            for (cx, cy) in [(x1,y1),(x2-1,y1),(x1,y2-1),(x2-1,y2-1)]:
+                cv2.rectangle(frame,
+                              (cx-lock_size//2, cy-lock_size//2),
+                              (cx+lock_size//2, cy+lock_size//2),
+                              (255, 150, 0), -1)
 
         if self.dragging:
             l, t, c = 18, 3, (0,255,80)
@@ -407,6 +426,8 @@ class PuzzleGame:
                 break
         for piece, pos in zip(self.pieces, positions):
             piece.current_pos = pos
+            piece.snapped     = False
+            piece.dragging    = False
 
         self.move_count = 0
         self.start_time = time.time()
@@ -452,11 +473,7 @@ class PuzzleGame:
 
     # ── 클리어 체크 ───────────────────────────
     def check_clear(self):
-        return all(
-            p.current_pos[0] == p.correct_pos[0] and
-            p.current_pos[1] == p.correct_pos[1]
-            for p in self.pieces
-        )
+        return all(p.snapped for p in self.pieces)
 
     # ── 가장 가까운 빈 슬롯 ───────────────────
     def find_nearest_grid(self, piece):
@@ -486,33 +503,47 @@ class PuzzleGame:
         p       = self.selected
         tile_px = p.size
 
-        # 가장 가까운 슬롯 찾기 (점유 무관)
-        best_pos, best_d = p.correct_pos, float('inf')
+        # 가장 가까운 슬롯 찾기 (snapped 조각이 있는 슬롯은 제외)
+        best_pos, best_d = self.grabbed_from, float('inf')
         for row in range(self.grid_size):
             for col in range(self.grid_size):
                 gx = self.board_x + col * tile_px
                 gy = self.board_y + row * tile_px
+                # snapped 조각이 점유한 슬롯은 막힘
+                occupant = next(
+                    (q for q in self.pieces
+                     if q is not p and q.current_pos == (gx, gy)), None)
+                if occupant and occupant.snapped:
+                    continue
                 cx = gx + tile_px // 2
                 cy = gy + tile_px // 2
                 d  = math.hypot(p.center()[0] - cx, p.center()[1] - cy)
                 if d < best_d:
                     best_d, best_pos = d, (gx, gy)
 
-        # 해당 슬롯에 다른 조각 있으면 → grabbed_from(원래 슬롯)으로 교환
+        # 교환 대상 찾기 (snapped 아닌 것만)
         other = next(
             (q for q in self.pieces
-             if q is not p and q.current_pos == best_pos), None)
+             if q is not p and q.current_pos == best_pos
+             and not q.snapped), None)
         if other is not None:
-            other.current_pos = self.grabbed_from  # 정확한 원래 슬롯으로 이동
+            other.current_pos = self.grabbed_from
 
-        p.current_pos     = best_pos
-        p.dragging        = False
-        self.selected     = None
+        p.current_pos = best_pos
+        p.dragging    = False
+        p.snapped     = p.is_correct()   # 정답 자리면 즉시 잠금
+        self.selected = None
 
         # ── 이동 횟수: 실제로 다른 조각과 자리가 바뀐 경우만 +1 ──
         # other가 있고 (교환 발생) AND 목적지가 원래 자리와 다를 때
         actually_swapped = (other is not None and best_pos != self.grabbed_from)
         self.grabbed_from = None
+
+        # ── 모든 조각 snapped 재검사 ──────────────────────────
+        # 교환으로 인해 간접적으로 정답 자리가 된 조각도 잠금 처리
+        for piece in self.pieces:
+            if not piece.snapped and piece.is_correct():
+                piece.snapped = True
 
         if actually_swapped:
             self.move_count += 1
@@ -540,6 +571,8 @@ class PuzzleGame:
         if fist and not self.grabbed:
             self.grabbed = True
             for piece in reversed(self.pieces):
+                if piece.snapped:        # 정답 고정 조각은 집을 수 없음
+                    continue
                 if piece.is_inside(ix, iy):
                     self.selected      = piece
                     piece.dragging     = True
@@ -810,8 +843,13 @@ class PuzzleGame:
             elif self.state == GameState.PLAYING:
                 self.update_interaction(lms)
                 frame = self.update_reset_gesture(frame, lms)
+                # snapped 조각 먼저(아래 레이어), 미완성 조각 나중(위 레이어)
                 for piece in self.pieces:
-                    piece.draw(frame, self.W, self.H)
+                    if piece.snapped:
+                        piece.draw(frame, self.W, self.H)
+                for piece in self.pieces:
+                    if not piece.snapped:
+                        piece.draw(frame, self.W, self.H)
 
             elif self.state == GameState.CLEAR:
                 for piece in self.pieces:
