@@ -100,6 +100,15 @@ class SoundManager:
         if self.enabled: self._clear.play()
 
 # ══════════════════════════════════════════════════════
+#  OpenCL (Intel GPU) 가속 설정
+# ══════════════════════════════════════════════════════
+cv2.ocl.setUseOpenCL(True)
+if cv2.ocl.haveOpenCL() and cv2.ocl.useOpenCL():
+    print("[INFO] OpenCL (GPU 가속) 활성화됨")
+else:
+    print("[INFO] OpenCL 미지원 환경 - CPU로 실행")
+
+# ══════════════════════════════════════════════════════
 #  모델 경로
 # ══════════════════════════════════════════════════════
 _USERPROFILE = os.environ.get("USERPROFILE", os.path.expanduser("~"))
